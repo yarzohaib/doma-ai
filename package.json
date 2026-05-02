@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@ai-sdk/replicate": "^1.0.18",
+    "@anthropic-ai/sdk": "^0.92.0",
     "@huggingface/inference": "^4.13.4",
     "@qdrant/js-client-rest": "^1.16.1",
     "@radix-ui/react-collapsible": "^1.1.2",
@@ -24,6 +25,7 @@
     "ai": "^5.0.93",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "dotenv": "^17.4.2",
     "embla-carousel-react": "^8.5.2",
     "lucide-react": "^0.473.0",
     "next": "^16.0.3",
