@@ -123,7 +123,7 @@ export async function performRoomRedesign(
   const styleDesc = STYLE_DESCRIPTORS[style];
 
   // Extract base64 from data URI
-  const match = imageDataUri.match(/^data:(image\/[\w+]+);base64,(.+)$/s);
+  const match = imageDataUri.match(/^data:(image\/[\w+]+);base64,([\s\S]+)$/);
   if (!match) throw new Error("Invalid image format. Provide a base64 data URI.");
   const [, rawMediaType, imageBase64] = match;
   const mediaType = rawMediaType.split(";")[0];
