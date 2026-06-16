@@ -63,9 +63,33 @@ export async function imageUrlToBase64(
   }
 }
 
-async function identifyRoomItems(imageBase64: string, mediaType: string): Promise<string[]> {
+async function describeRoomArchitecture(imageBase64: string, mediaType: string): Promise<string> {
   const response = await anthropic.messages.create({
-    model: "claude-haiku-4-5-20251001",
+    model: "claude-sonnet-4-6",
+    //model: "claude-haiku-4-5-20251001",
+    max_tokens: 160,
+    messages: [{
+      role: "user",
+      content: [
+        { type: "image", source: { type: "base64", media_type: mediaType as any, data: imageBase64 } },
+        {
+          type: "text",
+          text: `Describe ONLY the fixed architectural surfaces of this room (walls, floor, ceiling, windows, doors, trim). Do NOT mention any furniture, objects, or people — only surfaces that cannot be moved. One sentence, comma-separated. Example: "cream painted walls, beige marble tile floor with dark inset border, plain white flat ceiling with crown molding, large windows with beige curtains".`,
+        },
+      ],
+    }],
+  });
+  return response.content.filter(b => b.type === "text").map(b => (b as any).text).join("").trim();
+}
+
+async function identifyRoomItems(imageBase64: string, mediaType: string, style: string, userPrompt?: string): Promise<string[]> {
+  const intentLine = userPrompt
+    ? `The user wants to redesign this space as follows: "${userPrompt}". The interior style is ${style}.`
+    : `The interior style is ${style}.`;
+
+  const response = await anthropic.messages.create({
+    model: "claude-sonnet-4-6",
+    //model: "claude-haiku-4-5-20251001",
     max_tokens: 150,
     messages: [{
       role: "user",
@@ -73,8 +97,10 @@ async function identifyRoomItems(imageBase64: string, mediaType: string): Promis
         { type: "image", source: { type: "base64", media_type: mediaType as any, data: imageBase64 } },
         {
           type: "text",
-          text: `Analyze this room. List 4–5 furniture or decor items that are present or would naturally belong here.
-Reply with ONLY a JSON array of lowercase singular item names. Example: ["sofa", "rug", "coffee table", "floor lamp"]
+          text: `${intentLine}
+As an interior designer, list exactly 4-5 large standalone furniture pieces needed to furnish this space according to the user's intent and style.
+Only include items that sit on the floor: sofa, armchair, desk, office chair, dining table, bed, bookshelf, coffee table, rug, floor lamp, side table, etc.
+Reply with ONLY a JSON array of lowercase singular item names.
 No explanation. Just the JSON array.`,
         },
       ],
@@ -86,7 +112,7 @@ No explanation. Just the JSON array.`,
     const parsed = JSON.parse(text);
     return Array.isArray(parsed) ? parsed.slice(0, 5) : [];
   } catch {
-    return ["sofa", "rug", "coffee table", "floor lamp"];
+    return ["sofa", "rug", "coffee table", "armchair", "floor lamp"];
   }
 }
 
@@ -96,15 +122,16 @@ async function describeProductImage(
   itemCategory: string,
 ): Promise<string> {
   const response = await anthropic.messages.create({
-    model: "claude-haiku-4-5-20251001",
-    max_tokens: 80,
+    model: "claude-sonnet-4-6",
+    //model: "claude-haiku-4-5-20251001",
+    max_tokens: 140,
     messages: [{
       role: "user",
       content: [
         { type: "image", source: { type: "base64", media_type: mediaType as any, data: imageBase64 } },
         {
           type: "text",
-          text: `Describe this ${itemCategory} in one sentence for an interior design render prompt. Focus on shape, material, color, and finish. No brand names.`,
+          text: `Look at this ${itemCategory} and list its key visual properties as short comma-separated descriptive phrases for a text-to-image model. Include: color, material or fabric, shape, and one distinctive detail. Max 12 words total. Example format: "ivory boucle fabric, curved low-profile silhouette, tapered oak legs". No sentences, no brand names, no explanation.`,
         },
       ],
     }],
@@ -122,34 +149,39 @@ export async function performRoomRedesign(
 ): Promise<RedesignResult> {
   const styleDesc = STYLE_DESCRIPTORS[style];
 
-  // Extract base64 from data URI
   const match = imageDataUri.match(/^data:(image\/[\w+]+);base64,([\s\S]+)$/);
   if (!match) throw new Error("Invalid image format. Provide a base64 data URI.");
   const [, rawMediaType, imageBase64] = match;
   const mediaType = rawMediaType.split(";")[0];
 
-  // 1. Identify room items
+  // 1. Identify room items + describe architecture in parallel
   let roomItems: string[];
-  try {
-    roomItems = await identifyRoomItems(imageBase64, mediaType);
-  } catch {
-    roomItems = ["sofa", "rug", "coffee table", "floor lamp"];
-  }
+  let roomArchitecture: string;
+  [roomItems, roomArchitecture] = await Promise.all([
+    identifyRoomItems(imageBase64, mediaType, style, prompt).catch(() => ["sofa", "rug", "coffee table", "armchair", "floor lamp"]),
+    describeRoomArchitecture(imageBase64, mediaType).catch(() => ""),
+  ]);
 
-  // 2. Match each item to a DOMA product (parallel)
+  // 2. Match each item to a DOMA product
+  // Query combines style + user prompt + item so semantics reflect the full design intent.
+  const usedProductIds = new Set<string | number>();
+
   const matchResults = await Promise.all(
     roomItems.map(async (item) => {
       try {
-        const embedding = await generateEmbedding(`${style} ${item}`);
-        const results = await searchProducts(embedding, 1);
-        const top = results?.[0];
-        if (top?.score && top.score > 0.4) return { item, product: top };
+        const query = [style, prompt?.trim(), item].filter(Boolean).join(" ");
+        const embedding = await generateEmbedding(query);
+        const results = await searchProducts(embedding, 5);
+        const best = results.find(r => r.score && r.score > 0.15 && !usedProductIds.has(r.id));
+        if (!best) return { item, product: null };
+        usedProductIds.add(best.id);
+        return { item, product: best };
       } catch { /* no match */ }
       return { item, product: null };
     }),
   );
 
-  // 3. Build prompt — use Haiku vision on product images where available
+  // 3. Build product descriptions using Haiku vision on catalog images
   const productDescriptions: string[] = [];
 
   await Promise.all(
@@ -170,21 +202,26 @@ export async function performRoomRedesign(
     }),
   );
 
+  const furniturePlacements = productDescriptions.length > 0
+    ? productDescriptions.join("; ")
+    : `${style} sofa, area rug, coffee table, floor lamp`;
+
   const finalPrompt = [
-    styleDesc,
-    prompt ? prompt.trim() : "professionally decorated living space",
-    ...productDescriptions,
-    "photorealistic, 8k, interior photography, beautiful natural lighting, magazine quality",
-  ].join(", ");
+    prompt ? prompt.trim() : "",
+    `${styleDesc} interior`,
+    furniturePlacements,
+    roomArchitecture,
+    "photorealistic, 8k, interior photography, beautiful warm natural lighting, magazine quality",
+  ].filter(Boolean).join(", ");
 
   // 4. Flux Dev img2img
   const output: any = await replicate.run("black-forest-labs/flux-dev", {
     input: {
-      prompt: finalPrompt,
       image: imageDataUri,
-      prompt_strength: 0.8,
-      num_inference_steps: 28,
-      guidance_scale: 3.5,
+      prompt: finalPrompt,
+      prompt_strength: 0.75,
+      num_inference_steps: 35,
+      guidance_scale: 7.5,
       output_format: "jpg",
     },
   });
@@ -196,7 +233,7 @@ export async function performRoomRedesign(
     outputImage = `data:image/jpeg;base64,${Buffer.from(await blob.arrayBuffer()).toString("base64")}`;
   }
 
-  // 5. Shape the matched products response
+  // 5. Shape matched products response
   const matchedProducts: MatchedProduct[] = matchResults
     .filter(r => r.product !== null)
     .map(r => ({
