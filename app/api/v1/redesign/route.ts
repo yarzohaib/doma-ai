@@ -52,26 +52,13 @@ export async function OPTIONS() {
  */
 export async function POST(req: NextRequest) {
   try {
-    let { image, style, prompt } = await req.json();
+    let { image, style: rawStyle, prompt } = await req.json();
+    const style = VALID_STYLES.includes(rawStyle) ? rawStyle : 'modern';
 
     // Validate required fields
     if (!image) {
       return NextResponse.json(
         { success: false, error: "image is required (base64 data URI or https:// URL)" },
-        { status: 400, headers: CORS_HEADERS },
-      );
-    }
-
-    if (!style) {
-      return NextResponse.json(
-        { success: false, error: "style is required" },
-        { status: 400, headers: CORS_HEADERS },
-      );
-    }
-
-    if (!VALID_STYLES.includes(style)) {
-      return NextResponse.json(
-        { success: false, error: `style must be one of: ${VALID_STYLES.join(", ")}` },
         { status: 400, headers: CORS_HEADERS },
       );
     }
