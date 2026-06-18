@@ -198,6 +198,38 @@ export async function initQdrantCollection() {
   }
 }
 
+// ─── Helpers ───────────────────────────────────────────────────────────────
+
+// MongoDB ObjectIds are 24-char hex strings (e.g. "6a1490fe2d3c0e31597b80ae").
+// parseInt() on these gives garbage (stops at the first non-decimal char).
+// Qdrant supports UUID strings, so we pad the 24-char hex to 32 chars and
+// format as a UUID — fully deterministic and collision-free.
+function toQdrantId(id: string | number): string | number {
+  if (typeof id === 'number') return id;
+  if (/^[0-9a-f]{24}$/i.test(id)) {
+    const h = id.toLowerCase().padEnd(32, '0');
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
+  }
+  // Already a UUID or a pure-numeric string
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return id;
+  const n = parseInt(id, 10);
+  if (!isNaN(n)) return n;
+  throw new Error(`Cannot convert id to Qdrant id: ${id}`);
+}
+
+export async function resetCollection() {
+  const client = getClient();
+  const collections = await client.getCollections();
+  if (collections.collections.some(c => c.name === COLLECTION_NAME)) {
+    await client.deleteCollection(COLLECTION_NAME);
+    console.log('🗑️  Deleted old collection:', COLLECTION_NAME);
+  }
+  await client.createCollection(COLLECTION_NAME, {
+    vectors: { size: 384, distance: 'Cosine' },
+  });
+  console.log('✅ Recreated collection:', COLLECTION_NAME);
+}
+
 // ─── Upsert ────────────────────────────────────────────────────────────────
 // All fields except `id` and `embedding` are stored as-is in the Qdrant
 // payload so both the inpainting pipeline and the RAG chatbot can read
@@ -212,7 +244,7 @@ export async function upsertProducts(products: Array<{
     await client.upsert(COLLECTION_NAME, {
       wait: true,
       points: products.map(({ id, embedding, ...rest }) => ({
-        id: typeof id === 'string' ? parseInt(id) : id,
+        id: toQdrantId(id),
         vector: embedding,
         payload: rest,
       })),

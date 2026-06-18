@@ -13,21 +13,27 @@ function getHfClient(): HfInference {
   return new HfInference(apiKey);
 }
 
-// Generate embedding for a single text
-export async function generateEmbedding(text: string): Promise<number[]> {
-  try {
-    const hf = getHfClient(); // Get client with API key at runtime
-    
-    const response = await hf.featureExtraction({
-      model: EMBEDDING_MODEL,
-      inputs: text,
-    });
-    
-    return response as number[];
-  } catch (error) {
-    console.error('❌ Embedding error:', error);
-    throw new Error('Failed to generate embedding');
+// Generate embedding for a single text, retrying on transient network errors
+// (HF's free inference API occasionally times out under load)
+export async function generateEmbedding(text: string, retries = 3): Promise<number[]> {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const hf = getHfClient(); // Get client with API key at runtime
+
+      const response = await hf.featureExtraction({
+        model: EMBEDDING_MODEL,
+        inputs: text,
+      });
+
+      return response as number[];
+    } catch (error) {
+      const isLastAttempt = attempt === retries;
+      console.error(`❌ Embedding error (attempt ${attempt}/${retries}):`, error);
+      if (isLastAttempt) throw new Error('Failed to generate embedding');
+      await new Promise(r => setTimeout(r, attempt * 1000));
+    }
   }
+  throw new Error('Failed to generate embedding');
 }
 
 // Generate embeddings for multiple texts (batch)
